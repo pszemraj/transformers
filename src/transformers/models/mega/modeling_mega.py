@@ -44,7 +44,6 @@ from ...utils import (
 )
 from .configuration_mega import MegaConfig
 
-
 logger = logging.get_logger(__name__)
 
 _CHECKPOINT_FOR_DOC = "mnaylor/mega-base-wikitext"
@@ -1340,7 +1339,7 @@ class MegaPreTrainedModel(PreTrainedModel):
 
     config_class = MegaConfig
     base_model_prefix = "mega"
-    supports_gradient_checkpointing = False
+    supports_gradient_checkpointing = True
     _no_split_modules = ["MegaMovingAverageGatedAttention"]
 
     def _init_weights(self, module):
@@ -1386,6 +1385,10 @@ class MegaPreTrainedModel(PreTrainedModel):
         elif isinstance(module, nn.LayerNorm):
             module.bias.data.zero_()
             module.weight.data.fill_(1.0)
+
+    def _set_gradient_checkpointing(self, module, value=False):
+        if isinstance(module, MegaModel):
+            module.gradient_checkpointing = value
 
 
 MEGA_START_DOCSTRING = r"""
@@ -1473,6 +1476,8 @@ class MegaModel(MegaPreTrainedModel):
         self.layers = nn.ModuleList([MegaBlock(config) for _ in range(config.num_hidden_layers)])
 
         self.pooler = MegaPooler(config) if add_pooling_layer else None
+
+        self.gradient_checkpointing = False
 
         # Initialize weights and apply final processing (retained from RoBERTa code)
         self.post_init()
@@ -1588,6 +1593,13 @@ class MegaModel(MegaPreTrainedModel):
         if encoder_hidden_states is not None:
             encoder_hidden_states = encoder_hidden_states.transpose(0, 1)
 
+        if self.gradient_checkpointing and self.training:
+            if use_cache:
+                logger.warning_once(
+                    "`use_cache=True` is incompatible with gradient checkpointing. Setting `use_cache=False`..."
+                )
+                use_cache = False
+
         # pass through mega layers
         all_hidden_states = (embedding_output,) if output_hidden_states else None
         all_self_attentions = () if output_attentions else None
@@ -1595,16 +1607,39 @@ class MegaModel(MegaPreTrainedModel):
         next_decoder_cache = () if use_cache else None
         for i, mega_layer in enumerate(self.layers):
             current_decoder_cache = past_key_values[i] if past_key_values is not None else None
-            mega_outputs = mega_layer(
-                hidden_states=hidden_states,
-                attention_mask=attention_mask,
-                causal_mask=causal_mask,
-                encoder_hidden_states=encoder_hidden_states,
-                encoder_attention_mask=encoder_attention_mask,
-                past_key_value=current_decoder_cache,
-                output_attentions=output_attentions,
-                use_cache=use_cache,
-            )
+
+            if self.gradient_checkpointing and self.training:
+
+                def create_custom_forward(module):
+                    def custom_forward(*inputs):
+                        return module(
+                            *inputs,
+                            use_cache=use_cache,
+                            output_attentions=output_attentions,
+                        )
+
+                    return custom_forward
+
+                mega_outputs = torch.utils.checkpoint.checkpoint(
+                    create_custom_forward(mega_layer),
+                    hidden_states,
+                    attention_mask,
+                    causal_mask,
+                    encoder_hidden_states,
+                    encoder_attention_mask,
+                    current_decoder_cache,  # set to zero above if not using cache
+                )
+            else:
+                mega_outputs = mega_layer(
+                    hidden_states=hidden_states,
+                    attention_mask=attention_mask,
+                    causal_mask=causal_mask,
+                    encoder_hidden_states=encoder_hidden_states,
+                    encoder_attention_mask=encoder_attention_mask,
+                    past_key_value=current_decoder_cache,
+                    output_attentions=output_attentions,
+                    use_cache=use_cache,
+                )
 
             hidden_states = mega_outputs[0]
             if output_hidden_states:
