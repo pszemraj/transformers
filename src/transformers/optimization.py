@@ -15,6 +15,7 @@
 """PyTorch optimization for BERT model."""
 
 import math
+import os
 import warnings
 from functools import partial
 from typing import Callable, Iterable, Optional, Tuple, Union
@@ -27,7 +28,6 @@ from torch.optim.lr_scheduler import LambdaLR, ReduceLROnPlateau
 from .trainer_utils import SchedulerType
 from .utils import logging
 from .utils.versions import require_version
-
 
 logger = logging.get_logger(__name__)
 
@@ -237,7 +237,7 @@ def _get_polynomial_decay_schedule_with_warmup_lr_lambda(
 
 
 def get_polynomial_decay_schedule_with_warmup(
-    optimizer, num_warmup_steps, num_training_steps, lr_end=1e-7, power=1.0, last_epoch=-1
+    optimizer, num_warmup_steps, num_training_steps, lr_end=None, power=1.0, last_epoch=-1
 ):
     """
     Create a schedule with a learning rate that decreases as a polynomial decay from the initial lr set in the
@@ -266,6 +266,9 @@ def get_polynomial_decay_schedule_with_warmup(
         `torch.optim.lr_scheduler.LambdaLR` with the appropriate schedule.
 
     """
+    if lr_end is None:
+        lr_end = os.environ.get("POLY_LR_END", 1e-4)
+        logger.info(f"lr_end not set, using {lr_end} as default")
 
     lr_init = optimizer.defaults["lr"]
     if not (lr_init > lr_end):
