@@ -15,6 +15,7 @@
 """PyTorch optimization for BERT model."""
 
 import math
+import os
 import warnings
 from functools import partial
 from typing import Callable, Iterable, Optional, Tuple, Union
@@ -27,7 +28,6 @@ from torch.optim.lr_scheduler import LambdaLR, ReduceLROnPlateau
 from .trainer_utils import SchedulerType
 from .utils import logging
 from .utils.versions import require_version
-
 
 logger = logging.get_logger(__name__)
 
@@ -237,7 +237,7 @@ def _get_polynomial_decay_schedule_with_warmup_lr_lambda(
 
 
 def get_polynomial_decay_schedule_with_warmup(
-    optimizer, num_warmup_steps, num_training_steps, lr_end=1e-7, power=1.0, last_epoch=-1
+    optimizer, num_warmup_steps, num_training_steps, lr_end=None, power=1.0, last_epoch=-1
 ):
     """
     Create a schedule with a learning rate that decreases as a polynomial decay from the initial lr set in the
@@ -266,6 +266,9 @@ def get_polynomial_decay_schedule_with_warmup(
         `torch.optim.lr_scheduler.LambdaLR` with the appropriate schedule.
 
     """
+    if lr_end is None:
+        lr_end = os.environ.get("POLY_LR_END", 1e-4)
+        logger.info(f"lr_end not set, using {lr_end} as default")
 
     lr_init = optimizer.defaults["lr"]
     if not (lr_init > lr_end):
@@ -383,13 +386,13 @@ class AdamW(Optimizer):
     Parameters:
         params (`Iterable[nn.parameter.Parameter]`):
             Iterable of parameters to optimize or dictionaries defining parameter groups.
-        lr (`float`, *optional*, defaults to 0.001):
+        lr (`float`, *optional*, defaults to 1e-3):
             The learning rate to use.
-        betas (`Tuple[float,float]`, *optional*, defaults to `(0.9, 0.999)`):
+        betas (`Tuple[float,float]`, *optional*, defaults to (0.9, 0.999)):
             Adam's betas parameters (b1, b2).
-        eps (`float`, *optional*, defaults to 1e-06):
+        eps (`float`, *optional*, defaults to 1e-6):
             Adam's epsilon for numerical stability.
-        weight_decay (`float`, *optional*, defaults to 0.0):
+        weight_decay (`float`, *optional*, defaults to 0):
             Decoupled weight decay to apply.
         correct_bias (`bool`, *optional*, defaults to `True`):
             Whether or not to correct bias in Adam (for instance, in Bert TF repository they use `False`).
@@ -504,15 +507,15 @@ class Adafactor(Optimizer):
             Iterable of parameters to optimize or dictionaries defining parameter groups.
         lr (`float`, *optional*):
             The external learning rate.
-        eps (`Tuple[float, float]`, *optional*, defaults to `(1e-30, 0.001)`):
+        eps (`Tuple[float, float]`, *optional*, defaults to (1e-30, 1e-3)):
             Regularization constants for square gradient and parameter scale respectively
-        clip_threshold (`float`, *optional*, defaults to 1.0):
+        clip_threshold (`float`, *optional*, defaults 1.0):
             Threshold of root mean square of final gradient update
         decay_rate (`float`, *optional*, defaults to -0.8):
             Coefficient used to compute running averages of square
         beta1 (`float`, *optional*):
             Coefficient used for computing running averages of gradient
-        weight_decay (`float`, *optional*, defaults to 0.0):
+        weight_decay (`float`, *optional*, defaults to 0):
             Weight decay (L2 penalty)
         scale_parameter (`bool`, *optional*, defaults to `True`):
             If True, learning rate is scaled by root mean square
