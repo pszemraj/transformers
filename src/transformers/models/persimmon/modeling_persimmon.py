@@ -536,7 +536,7 @@ class PersimmonFlashAttention2(PersimmonAttention):
             (cu_seqlens_q, cu_seqlens_k),
             (max_seqlen_in_batch_q, max_seqlen_in_batch_k),
         )
-        
+
 
 class PersimmonDecoderLayer(nn.Module):
     def __init__(self, config: PersimmonConfig):
