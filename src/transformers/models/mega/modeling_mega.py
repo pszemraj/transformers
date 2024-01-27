@@ -15,6 +15,7 @@
 """PyTorch MEGA model."""
 
 import math
+import os
 from typing import List, Optional, Tuple, Union
 
 import torch
@@ -1610,6 +1611,8 @@ class MegaModel(MegaPreTrainedModel):
 
             if self.gradient_checkpointing and self.training:
 
+                _use_reentrant = os.environ.get("MEGA_USE_RENTRANT", "False") == "True"
+
                 def create_custom_forward(module):
                     def custom_forward(*inputs):
                         return module(
@@ -1628,6 +1631,8 @@ class MegaModel(MegaPreTrainedModel):
                     encoder_hidden_states,
                     encoder_attention_mask,
                     current_decoder_cache,  # set to zero above if not using cache
+                    use_reentrant=_use_reentrant,
+                    determinism_check="none",
                 )
             else:
                 mega_outputs = mega_layer(
