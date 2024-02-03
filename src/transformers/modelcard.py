@@ -387,7 +387,7 @@ class TrainingSummary:
                 for tag in info.tags:
                     if tag.startswith("license:"):
                         self.license = tag[8:]
-            except (requests.exceptions.HTTPError, HFValidationError):
+            except (requests.exceptions.HTTPError, requests.exceptions.ConnectionError, HFValidationError):
                 pass
 
     def create_model_index(self, metric_mapping):
@@ -704,7 +704,7 @@ class TrainingSummary:
 
 def parse_keras_history(logs):
     """
-    Parse the `logs` of either a `tf.keras.History` object returned by `model.fit()` or an accumulated logs `dict`
+    Parse the `logs` of either a `keras.History` object returned by `model.fit()` or an accumulated logs `dict`
     passed to the `PushToHubCallback`. Returns lines and logs compatible with those returned by `parse_log_history`.
     """
     if hasattr(logs, "history"):
@@ -800,14 +800,14 @@ def parse_log_history(log_history):
 
 
 def extract_hyperparameters_from_keras(model):
-    import tensorflow as tf
+    from .modeling_tf_utils import keras
 
     hyperparameters = {}
     if hasattr(model, "optimizer") and model.optimizer is not None:
         hyperparameters["optimizer"] = model.optimizer.get_config()
     else:
         hyperparameters["optimizer"] = None
-    hyperparameters["training_precision"] = tf.keras.mixed_precision.global_policy().name
+    hyperparameters["training_precision"] = keras.mixed_precision.global_policy().name
 
     return hyperparameters
 
@@ -895,10 +895,10 @@ def extract_hyperparameters_from_trainer(trainer):
         hyperparameters["num_epochs"] = trainer.args.num_train_epochs
 
     if trainer.args.fp16:
-        if trainer.use_cuda_amp:
-            hyperparameters["mixed_precision_training"] = "Native AMP"
-        elif trainer.use_apex:
+        if trainer.use_apex:
             hyperparameters["mixed_precision_training"] = f"Apex, opt level {trainer.args.fp16_opt_level}"
+        else:
+            hyperparameters["mixed_precision_training"] = "Native AMP"
 
     if trainer.args.label_smoothing_factor != 0.0:
         hyperparameters["label_smoothing_factor"] = trainer.args.label_smoothing_factor
