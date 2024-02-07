@@ -1477,6 +1477,7 @@ class MegaModel(MegaPreTrainedModel):
         self.pooler = MegaPooler(config) if add_pooling_layer else None
 
         self.gradient_checkpointing = False
+        self.reentrant_checkpointing = False
 
         # Initialize weights and apply final processing (retained from RoBERTa code)
         self.post_init()
@@ -1629,7 +1630,7 @@ class MegaModel(MegaPreTrainedModel):
                     encoder_hidden_states,
                     encoder_attention_mask,
                     current_decoder_cache,  # set to zero above if not using cache
-                    use_reentrant=_use_reentrant,
+                    use_reentrant=self.reentrant_checkpointing,
                     determinism_check="none",
                 )
             else:
