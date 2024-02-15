@@ -1162,7 +1162,7 @@ MODEL_FOR_TEXT_ENCODING_MAPPING_NAMES = OrderedDict(
         ("mobilebert", "MobileBertModel"),
         ("mt5", "MT5EncoderModel"),
         ("nystromformer", "NystromformerModel"),
-        ("pegasus-x", "PegasusXModel"),
+        ("pegasus_x", "PegasusXModel"),
         ("reformer", "ReformerModel"),
         ("rembert", "RemBertModel"),
         ("roberta", "RobertaModel"),
