@@ -77,6 +77,34 @@ class DimensionInfo:
     #       a multiple of block size at the start of the encoder layers, so T=P always.
 
 
+class PegasusXSeq2SeqModelOutput(Seq2SeqModelOutput):
+    global_hidden_states: Optional[Tuple[torch.FloatTensor]] = None
+
+    def __init__(
+        self,
+        last_hidden_state: torch.FloatTensor,
+        past_key_values: Optional[Tuple[Tuple[torch.FloatTensor]]] = None,
+        decoder_hidden_states: Optional[Tuple[torch.FloatTensor]] = None,
+        decoder_attentions: Optional[Tuple[torch.FloatTensor]] = None,
+        cross_attentions: Optional[Tuple[torch.FloatTensor]] = None,
+        encoder_last_hidden_state: Optional[torch.FloatTensor] = None,
+        encoder_hidden_states: Optional[Tuple[torch.FloatTensor]] = None,
+        encoder_attentions: Optional[Tuple[torch.FloatTensor]] = None,
+        global_hidden_states: Optional[Tuple[torch.FloatTensor]] = None,
+    ):
+        super().__init__(
+            last_hidden_state=last_hidden_state,
+            past_key_values=past_key_values,
+            decoder_hidden_states=decoder_hidden_states,
+            decoder_attentions=decoder_attentions,
+            cross_attentions=cross_attentions,
+            encoder_last_hidden_state=encoder_last_hidden_state,
+            encoder_hidden_states=encoder_hidden_states,
+            encoder_attentions=encoder_attentions,
+        )
+        self.global_hidden_states = global_hidden_states
+
+
 # Copied from transformers.models.bart.modeling_bart.shift_tokens_right
 def shift_tokens_right(
     input_ids: torch.Tensor, pad_token_id: int, decoder_start_token_id: int
@@ -1617,11 +1645,15 @@ class PegasusXModel(PegasusXPreTrainedModel):
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
         )
-
         if not return_dict:
-            return decoder_outputs + encoder_outputs
+            output = (
+                (decoder_outputs + encoder_outputs)
+                if encoder_outputs
+                else decoder_outputs
+            )
+            return output
 
-        return Seq2SeqModelOutput(
+        return PegasusXSeq2SeqModelOutput(
             last_hidden_state=decoder_outputs.last_hidden_state,
             past_key_values=decoder_outputs.past_key_values,
             decoder_hidden_states=decoder_outputs.hidden_states,
@@ -1630,6 +1662,7 @@ class PegasusXModel(PegasusXPreTrainedModel):
             encoder_last_hidden_state=encoder_outputs.last_hidden_state,
             encoder_hidden_states=encoder_outputs.hidden_states,
             encoder_attentions=encoder_outputs.attentions,
+            global_hidden_states=encoder_outputs.global_hidden_states,  # This line now properly supported
         )
 
 
