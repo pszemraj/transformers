@@ -996,6 +996,22 @@ PEGASUS_X_INPUTS_DOCSTRING = r"""
 """
 
 
+class PegasusXModelOutput(BaseModelOutput):
+    def __init__(
+        self,
+        last_hidden_state,
+        hidden_states=None,
+        attentions=None,
+        global_hidden_states=None,
+    ):
+        super().__init__(
+            last_hidden_state=last_hidden_state,
+            hidden_states=hidden_states,
+            attentions=attentions,
+        )
+        self.global_hidden_states = global_hidden_states
+
+
 class PegasusXEncoder(PegasusXPreTrainedModel):
     """
     Transformer encoder consisting of *config.encoder_layers* self attention layers. Each layer is a
@@ -1237,7 +1253,7 @@ class PegasusXEncoder(PegasusXPreTrainedModel):
                 ]
                 if v is not None
             )
-        return BaseModelOutput(
+        return PegasusXModelOutput(
             last_hidden_state=hidden_states,
             hidden_states=encoder_states,
             attentions=all_attentions,
