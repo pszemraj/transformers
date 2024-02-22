@@ -270,7 +270,7 @@ def get_polynomial_decay_schedule_with_warmup(
 
     """
     if lr_end is None:
-        lr_end = os.environ.get("POLY_LR_END", 1e-4)
+        lr_end = float(os.environ.get("POLY_LR_END", 1e-4))
         logger.info(f"lr_end not set, using {lr_end} as default")
 
     lr_init = optimizer.defaults["lr"]
