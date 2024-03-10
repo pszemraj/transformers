@@ -15,7 +15,6 @@
 """PyTorch MEGA model."""
 
 import math
-import os
 from typing import List, Optional, Tuple, Union
 
 import torch
@@ -44,6 +43,7 @@ from ...utils import (
     replace_return_docstrings,
 )
 from .configuration_mega import MegaConfig
+
 
 logger = logging.get_logger(__name__)
 
@@ -1683,6 +1683,55 @@ class MegaModel(MegaPreTrainedModel):
         # Initialize weights and apply final processing (retained from RoBERTa code)
         self.post_init()
 
+    def _pad_to_chunk_size(
+        self,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor,
+        token_type_ids: torch.Tensor,
+        inputs_embeds: torch.Tensor,
+        pad_token_id: int,
+    ):
+        """A helper function to pad tokens and mask to work with implementation of MEGA self-attention."""
+        # Check if chunking is used
+        if self.config.chunk_size > 0:
+            # Pad to a multiple of chunk_size
+            input_shape = (
+                input_ids.shape if input_ids is not None else inputs_embeds.shape
+            )
+            batch_size, seq_len = input_shape[:2]
+            padding_len = (
+                self.config.chunk_size - seq_len % self.config.chunk_size
+            ) % self.config.chunk_size
+            if padding_len > 0:
+                logger.warning_once(
+                    f"Input ids are automatically padded from {seq_len} to {seq_len + padding_len} to be a multiple of "
+                    f"`config.chunk_size`: {self.config.chunk_size}"
+                )
+                if input_ids is not None:
+                    input_ids = nn.functional.pad(
+                        input_ids, (0, padding_len), value=pad_token_id
+                    )
+                if inputs_embeds is not None:
+                    input_ids_padding = inputs_embeds.new_full(
+                        (batch_size, padding_len),
+                        self.config.pad_token_id,
+                        dtype=torch.long,
+                    )
+                    inputs_embeds_padding = self.embeddings(input_ids_padding)
+                    inputs_embeds = torch.cat(
+                        [inputs_embeds, inputs_embeds_padding], dim=-2
+                    )
+                attention_mask = nn.functional.pad(
+                    attention_mask, (0, padding_len), value=0
+                )  # no attention on the padding tokens
+                token_type_ids = nn.functional.pad(
+                    token_type_ids, (0, padding_len), value=0
+                )  # pad with token_type_id = 0
+            return padding_len, input_ids, attention_mask, token_type_ids, inputs_embeds
+        else:
+            # No padding needed
+            return 0, input_ids, attention_mask, token_type_ids, inputs_embeds
+
     def get_input_embeddings(self):
         return self.embedding_layer.word_embeddings
 
@@ -1763,6 +1812,24 @@ class MegaModel(MegaPreTrainedModel):
         if self.config.use_chunking:
             input_shape = torch.tensor([input_shape[0], self.config.chunk_size])
 
+            # pad to chunk size if using chunking
+            padding_len, input_ids, attention_mask, token_type_ids, inputs_embeds = (
+                self._pad_to_chunk_size(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    token_type_ids=token_type_ids,
+                    inputs_embeds=inputs_embeds,
+                    pad_token_id=(
+                        self.config.pad_token_id
+                        if self.config.pad_token_id is not None
+                        else self.config.eos_token_id
+                    ),
+                )
+            )
+
+        input_shape = (
+            input_ids.size() if input_ids is not None else inputs_embeds.size()[:-1]
+        )
         batch_size, sequence_length = input_shape
 
         if self.config.use_chunking and (sequence_length > self.config.chunk_size):
