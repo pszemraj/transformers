@@ -1955,7 +1955,7 @@ class MegaModel(MegaPreTrainedModel):
             padding_len = (chunk_size - seq_len % chunk_size) % chunk_size
 
         if padding_len > 0:
-            logger.warning_once(
+            logger.debug(
                 f"Input ids are automatically padded from {seq_len} to {seq_len + padding_len} to be a multiple of "
                 f"`config.chunk_size`: {chunk_size}"
             )
