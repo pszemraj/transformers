@@ -1810,6 +1810,12 @@ class MegaModel(MegaPreTrainedModel):
         else:
             raise ValueError("You have to specify either input_ids or inputs_embeds")
 
+        # handle inputs being None
+        if attention_mask is None:
+            attention_mask = torch.ones(input_shape, device=device)
+        if token_type_ids is None:
+            token_type_ids = torch.zeros(input_shape, dtype=torch.long, device=device)
+
         if self.config.use_chunking:
             input_shape = torch.tensor([input_shape[0], self.config.chunk_size])
 
