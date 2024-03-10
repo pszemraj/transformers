@@ -1687,7 +1687,7 @@ class MegaModel(MegaPreTrainedModel):
         self,
         input_ids: torch.Tensor,
         attention_mask: torch.Tensor,
-        token_type_ids: torch.Tensor,
+        token_type_ids: Optional[torch.Tensor],
         inputs_embeds: torch.Tensor,
         pad_token_id: int,
     ):
@@ -1724,9 +1724,10 @@ class MegaModel(MegaPreTrainedModel):
                 attention_mask = nn.functional.pad(
                     attention_mask, (0, padding_len), value=0
                 )  # no attention on the padding tokens
-                token_type_ids = nn.functional.pad(
-                    token_type_ids, (0, padding_len), value=0
-                )  # pad with token_type_id = 0
+                if token_type_ids is not None:
+                    token_type_ids = nn.functional.pad(
+                        token_type_ids, (0, padding_len), value=0
+                    )  # pad with token_type_id = 0
             return padding_len, input_ids, attention_mask, token_type_ids, inputs_embeds
         else:
             # No padding needed
