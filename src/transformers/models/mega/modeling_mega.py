@@ -1948,7 +1948,12 @@ class MegaModel(MegaPreTrainedModel):
         chunk_size = self.config.chunk_size
         input_shape = input_ids.shape if input_ids is not None else inputs_embeds.shape
         batch_size, seq_len = input_shape[:2]
-        padding_len = (chunk_size - seq_len % chunk_size) % chunk_size
+
+        if seq_len <= chunk_size:
+            padding_len = 0
+        else:
+            padding_len = (chunk_size - seq_len % chunk_size) % chunk_size
+
         if padding_len > 0:
             logger.warning_once(
                 f"Input ids are automatically padded from {seq_len} to {seq_len + padding_len} to be a multiple of "
@@ -1958,7 +1963,6 @@ class MegaModel(MegaPreTrainedModel):
                 input_ids = nn.functional.pad(
                     input_ids, (0, padding_len), value=pad_token_id
                 )
-
             if inputs_embeds is not None:
                 input_ids_padding = inputs_embeds.new_full(
                     (batch_size, padding_len),
@@ -1972,11 +1976,11 @@ class MegaModel(MegaPreTrainedModel):
             attention_mask = nn.functional.pad(
                 attention_mask, (0, padding_len), value=False
             )  # no attention on the padding tokens
-            if token_type_ids is None:
-                token_type_ids = torch.zeros_like(attention_mask, dtype=torch.long)
-            token_type_ids = nn.functional.pad(
-                token_type_ids, (0, padding_len), value=0
-            )  # pad with token_type_id = 0
+            if token_type_ids is not None:
+                token_type_ids = nn.functional.pad(
+                    token_type_ids, (0, padding_len), value=0
+                )  # pad with token_type_id = 0
+
         return (
             padding_len,
             input_ids,
