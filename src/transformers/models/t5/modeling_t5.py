@@ -338,6 +338,20 @@ class T5LayerFF(nn.Module):
         return hidden_states
 
 
+def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
+    """
+    This is the equivalent of torch.repeat_interleave(x, dim=1, repeats=n_rep). The hidden states go from (batch,
+    num_key_value_heads, seqlen, head_dim) to (batch, num_attention_heads, seqlen, head_dim)
+    """
+    batch, num_key_value_heads, slen, head_dim = hidden_states.shape
+    if n_rep == 1:
+        return hidden_states
+    hidden_states = hidden_states[:, :, None, :, :].expand(
+        batch, num_key_value_heads, n_rep, slen, head_dim
+    )
+    return hidden_states.reshape(batch, num_key_value_heads * n_rep, slen, head_dim)
+
+
 class T5Attention(nn.Module):
     def __init__(self, config: T5Config, has_relative_attention_bias=False):
         super().__init__()
@@ -351,16 +365,33 @@ class T5Attention(nn.Module):
         self.dropout = config.dropout_rate
         self.inner_dim = self.n_heads * self.key_value_proj_dim
 
-        # Mesh TensorFlow initialization to avoid scaling before softmax
-        self.q = nn.Linear(self.d_model, self.inner_dim, bias=False)
-        self.k = nn.Linear(self.d_model, self.inner_dim, bias=False)
-        self.v = nn.Linear(self.d_model, self.inner_dim, bias=False)
-        self.o = nn.Linear(self.inner_dim, self.d_model, bias=False)
+        # GQA-related attributes
+        self.use_gqa = getattr(config, "use_gqa", False)
+        self.num_key_value_heads = (
+            getattr(config, "num_key_value_heads", self.n_heads)
+            if self.use_gqa
+            else self.n_heads
+        )
+        self.num_key_value_groups = self.n_heads // self.num_key_value_heads
+
+        # Linear layers for query, key, and value projections
+        self.q = nn.Linear(
+            self.d_model, self.n_heads * self.key_value_proj_dim, bias=False
+        )
+        self.k = nn.Linear(
+            self.d_model, self.num_key_value_heads * self.key_value_proj_dim, bias=False
+        )
+        self.v = nn.Linear(
+            self.d_model, self.num_key_value_heads * self.key_value_proj_dim, bias=False
+        )
+        self.o = nn.Linear(
+            self.n_heads * self.key_value_proj_dim, self.d_model, bias=False
+        )
 
         if self.has_relative_attention_bias:
-            self.relative_attention_bias = nn.Embedding(self.relative_attention_num_buckets, self.n_heads)
-        self.pruned_heads = set()
-        self.gradient_checkpointing = False
+            self.relative_attention_bias = nn.Embedding(
+                self.relative_attention_num_buckets, self.n_heads
+            )
 
     def prune_heads(self, heads):
         if len(heads) == 0:
@@ -458,40 +489,58 @@ class T5Attention(nn.Module):
         """
         Self-attention (if key_value_states is None) or attention over source sentence (provided by key_value_states).
         """
-        # Input is (batch_size, seq_length, dim)
-        # Mask is (batch_size, key_length) (non-causal) or (batch_size, key_length, key_length)
-        # past_key_value[0] is (batch_size, n_heads, q_len - 1, dim_per_head)
         batch_size, seq_length = hidden_states.shape[:2]
 
         real_seq_length = seq_length
 
         if past_key_value is not None:
-            if len(past_key_value) != 2:
-                raise ValueError(
-                    f"past_key_value should have 2 past states: keys and values. Got { len(past_key_value)} past states"
-                )
-            real_seq_length += past_key_value[0].shape[2] if query_length is None else query_length
+            assert (
+                len(past_key_value) == 2
+            ), f"past_key_value should have 2 past states: keys and values. Got { len(past_key_value)} past states"
+            real_seq_length += (
+                past_key_value[0].shape[2] if query_length is None else query_length
+            )
 
-        key_length = real_seq_length if key_value_states is None else key_value_states.shape[1]
+        key_length = (
+            real_seq_length if key_value_states is None else key_value_states.shape[1]
+        )
 
-        def shape(states):
+        def shape(states, heads):
             """projection"""
-            return states.view(batch_size, -1, self.n_heads, self.key_value_proj_dim).transpose(1, 2)
+            return states.view(
+                batch_size, -1, heads, self.key_value_proj_dim
+            ).transpose(1, 2)
 
         def unshape(states):
             """reshape"""
-            return states.transpose(1, 2).contiguous().view(batch_size, -1, self.inner_dim)
+            return (
+                states.transpose(1, 2).contiguous().view(batch_size, -1, self.inner_dim)
+            )
 
         def project(hidden_states, proj_layer, key_value_states, past_key_value):
             """projects hidden states correctly to key/query states"""
             if key_value_states is None:
                 # self-attn
                 # (batch_size, n_heads, seq_length, dim_per_head)
-                hidden_states = shape(proj_layer(hidden_states))
+                hidden_states = shape(
+                    proj_layer(hidden_states),
+                    (
+                        self.num_key_value_heads
+                        if proj_layer == self.k or proj_layer == self.v
+                        else self.n_heads
+                    ),
+                )
             elif past_key_value is None:
                 # cross-attn
                 # (batch_size, n_heads, seq_length, dim_per_head)
-                hidden_states = shape(proj_layer(key_value_states))
+                hidden_states = shape(
+                    proj_layer(key_value_states),
+                    (
+                        self.num_key_value_heads
+                        if proj_layer == self.k or proj_layer == self.v
+                        else self.n_heads
+                    ),
+                )
 
             if past_key_value is not None:
                 if key_value_states is None:
@@ -503,37 +552,59 @@ class T5Attention(nn.Module):
                     # the provided `key_value_states` to support prefix tuning
                     # cross-attn
                     # (batch_size, n_heads, seq_length, dim_per_head)
-                    hidden_states = shape(proj_layer(key_value_states))
+                    hidden_states = shape(
+                        proj_layer(key_value_states),
+                        (
+                            self.num_key_value_heads
+                            if proj_layer == self.k or proj_layer == self.v
+                            else self.n_heads
+                        ),
+                    )
                 else:
                     # cross-attn
                     hidden_states = past_key_value
             return hidden_states
 
         # get query states
-        query_states = shape(self.q(hidden_states))  # (batch_size, n_heads, seq_length, dim_per_head)
+        query_states = shape(
+            self.q(hidden_states), self.n_heads
+        )  # (batch_size, n_heads, seq_length, dim_per_head)
 
         # get key/value states
         key_states = project(
-            hidden_states, self.k, key_value_states, past_key_value[0] if past_key_value is not None else None
+            hidden_states,
+            self.k,
+            key_value_states,
+            past_key_value[0] if past_key_value is not None else None,
         )
         value_states = project(
-            hidden_states, self.v, key_value_states, past_key_value[1] if past_key_value is not None else None
+            hidden_states,
+            self.v,
+            key_value_states,
+            past_key_value[1] if past_key_value is not None else None,
         )
 
+        # Group Query Attention
+        if self.use_gqa:
+            key_states = repeat_kv(key_states, self.num_key_value_groups)
+            value_states = repeat_kv(value_states, self.num_key_value_groups)
+
         # compute scores
-        scores = torch.matmul(
-            query_states, key_states.transpose(3, 2)
-        )  # equivalent of torch.einsum("bnqd,bnkd->bnqk", query_states, key_states), compatible with onnx op>9
+        scores = torch.matmul(query_states, key_states.transpose(3, 2))
 
         if position_bias is None:
             if not self.has_relative_attention_bias:
                 position_bias = torch.zeros(
-                    (1, self.n_heads, real_seq_length, key_length), device=scores.device, dtype=scores.dtype
+                    (1, self.n_heads, real_seq_length, key_length),
+                    device=scores.device,
+                    dtype=scores.dtype,
                 )
                 if self.gradient_checkpointing and self.training:
                     position_bias.requires_grad = True
             else:
-                position_bias = self.compute_bias(real_seq_length, key_length, device=scores.device)
+                position_bias = self.compute_bias(
+                    real_seq_length, key_length, device=scores.device
+                )
 
             # if key and values are already calculated
             # we want only the last query position bias
@@ -541,7 +612,9 @@ class T5Attention(nn.Module):
                 position_bias = position_bias[:, :, -hidden_states.size(1) :, :]
 
             if mask is not None:
-                position_bias = position_bias + mask  # (batch_size, n_heads, seq_length, key_length)
+                position_bias = (
+                    position_bias + mask
+                )  # (batch_size, n_heads, seq_length, key_length)
 
         if self.pruned_heads:
             mask = torch.ones(position_bias.shape[1])
@@ -551,21 +624,21 @@ class T5Attention(nn.Module):
             position_bias_masked = position_bias
 
         scores += position_bias_masked
-        attn_weights = nn.functional.softmax(scores.float(), dim=-1).type_as(
-            scores
-        )  # (batch_size, n_heads, seq_length, key_length)
+        attn_weights = nn.functional.softmax(scores.float(), dim=-1).type_as(scores)
         attn_weights = nn.functional.dropout(
             attn_weights, p=self.dropout, training=self.training
-        )  # (batch_size, n_heads, seq_length, key_length)
+        )
 
         # Mask heads if we want to
         if layer_head_mask is not None:
             attn_weights = attn_weights * layer_head_mask
 
-        attn_output = unshape(torch.matmul(attn_weights, value_states))  # (batch_size, seq_length, dim)
+        attn_output = unshape(torch.matmul(attn_weights, value_states))
         attn_output = self.o(attn_output)
 
-        present_key_value_state = (key_states, value_states) if (self.is_decoder and use_cache) else None
+        present_key_value_state = (
+            (key_states, value_states) if (self.is_decoder and use_cache) else None
+        )
         outputs = (attn_output,) + (present_key_value_state,) + (position_bias,)
 
         if output_attentions:

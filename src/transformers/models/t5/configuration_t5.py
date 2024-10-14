@@ -51,6 +51,8 @@ class T5Config(PretrainedConfig):
             Number of hidden layers in the Transformer decoder. Will use the same value as `num_layers` if not set.
         num_heads (`int`, *optional*, defaults to 8):
             Number of attention heads for each attention layer in the Transformer encoder.
+        num_key_value_heads (`int`, *optional*, defaults to 8):
+            Number of attention heads for each attention group.
         relative_attention_num_buckets (`int`, *optional*, defaults to 32):
             The number of buckets to use for each attention layer.
         relative_attention_max_distance (`int`, *optional*, defaults to 128):
@@ -69,6 +71,8 @@ class T5Config(PretrainedConfig):
             `"gated-gelu"` feed forward projection. Original T5 uses `"relu"`.
         use_cache (`bool`, *optional*, defaults to `True`):
             Whether or not the model should return the last key/values attentions (not used by all models).
+        use_gqa (`bool`, *optional*, defaults to `False`):
+            Whether or not the model should use group-query attention.
     """
 
     model_type = "t5"
@@ -84,6 +88,7 @@ class T5Config(PretrainedConfig):
         num_layers=6,
         num_decoder_layers=None,
         num_heads=8,
+        num_key_value_heads=8,
         relative_attention_num_buckets=32,
         relative_attention_max_distance=128,
         dropout_rate=0.1,
@@ -92,6 +97,7 @@ class T5Config(PretrainedConfig):
         feed_forward_proj="relu",
         is_encoder_decoder=True,
         use_cache=True,
+        use_gqa=False,
         pad_token_id=0,
         eos_token_id=1,
         classifier_dropout=0.0,
@@ -106,6 +112,7 @@ class T5Config(PretrainedConfig):
             num_decoder_layers if num_decoder_layers is not None else self.num_layers
         )  # default = symmetry
         self.num_heads = num_heads
+        self.num_key_value_heads = num_key_value_heads
         self.relative_attention_num_buckets = relative_attention_num_buckets
         self.relative_attention_max_distance = relative_attention_max_distance
         self.dropout_rate = dropout_rate
@@ -114,6 +121,7 @@ class T5Config(PretrainedConfig):
         self.initializer_factor = initializer_factor
         self.feed_forward_proj = feed_forward_proj
         self.use_cache = use_cache
+        self.use_gqa = use_gqa
 
         act_info = self.feed_forward_proj.split("-")
         self.dense_act_fn = act_info[-1]
@@ -129,6 +137,12 @@ class T5Config(PretrainedConfig):
         # for backwards compatibility
         if feed_forward_proj == "gated-gelu":
             self.dense_act_fn = "gelu_new"
+
+        if self.use_gqa:
+            assert self.num_heads % self.num_key_value_heads == 0, (
+                "If `use_gqa=True`, `num_heads` must be divisible by `num_key_value_heads`"
+                f"but got `num_heads={self.num_heads}` and `num_key_value_heads={self.num_key_value_heads}`."
+            )
 
         super().__init__(
             pad_token_id=pad_token_id,
