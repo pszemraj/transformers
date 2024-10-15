@@ -555,22 +555,31 @@ class T5Attention(nn.Module):
             if mask is not None:
                 position_bias = position_bias + mask
 
-        if self.use_gqa and self.num_key_value_heads != self.n_heads:
-            # Repeat position_bias to match n_heads
-            n_rep = self.n_heads // self.num_key_value_heads
-            position_bias = position_bias.reshape(1, self.num_key_value_heads, -1, key_length)
-            position_bias = position_bias.repeat_interleave(n_rep, dim=1)
+        def pad_position_bias(position_bias, desired_size):
+            """
+            Pad position_bias to match desired_size
+
+            TODO: revisit this function
+            """
+            current_size = position_bias.size(-1)
+            if current_size < desired_size:
+                padding = desired_size - current_size
+                return nn.functional.pad(position_bias, (0, padding), value=0)
+            return position_bias
 
         # if self.use_gqa and self.num_key_value_heads != self.n_heads:
         #     # Repeat position_bias to match n_heads
         #     n_rep = self.n_heads // self.num_key_value_heads
-        #     position_bias = position_bias.view(1, self.num_key_value_heads, -1, key_length)
+        #     position_bias = position_bias.reshape(1, self.num_key_value_heads, -1, key_length)
         #     position_bias = position_bias.repeat_interleave(n_rep, dim=1)
 
         if self.pruned_heads:
             mask = torch.ones(position_bias.shape[1], dtype=torch.bool)
             mask[list(self.pruned_heads)] = False
             position_bias = position_bias[:, mask]
+
+        # Ensure position_bias has the same size as scores in the last dimension
+        position_bias = pad_position_bias(position_bias, scores.size(-1))
 
         scores += position_bias
 
