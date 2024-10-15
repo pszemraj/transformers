@@ -337,21 +337,6 @@ class T5LayerFF(nn.Module):
         hidden_states = hidden_states + self.dropout(forwarded_states)
         return hidden_states
 
-
-def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
-    """
-    This is the equivalent of torch.repeat_interleave(x, dim=1, repeats=n_rep). The hidden states go from (batch,
-    num_key_value_heads, seqlen, head_dim) to (batch, num_attention_heads, seqlen, head_dim)
-    """
-    batch, num_key_value_heads, slen, head_dim = hidden_states.shape
-    if n_rep == 1:
-        return hidden_states
-    hidden_states = hidden_states[:, :, None, :, :].expand(
-        batch, num_key_value_heads, n_rep, slen, head_dim
-    )
-    return hidden_states.reshape(batch, num_key_value_heads * n_rep, slen, head_dim)
-
-
 class T5Attention(nn.Module):
     def __init__(self, config: T5Config, has_relative_attention_bias=False):
         super().__init__()
@@ -367,33 +352,27 @@ class T5Attention(nn.Module):
 
         # GQA-related attributes
         self.use_gqa = getattr(config, "use_gqa", False)
-        self.num_key_value_heads = (
-            getattr(config, "num_key_value_heads", self.n_heads)
-            if self.use_gqa
-            else self.n_heads
-        )
+        self.num_key_value_heads = getattr(config, "num_key_value_heads", self.n_heads)
         self.num_key_value_groups = self.n_heads // self.num_key_value_heads
 
         # Linear layers for query, key, and value projections
-        self.q = nn.Linear(
-            self.d_model, self.n_heads * self.key_value_proj_dim, bias=False
-        )
+        self.q = nn.Linear(self.d_model, self.inner_dim, bias=False)
         self.k = nn.Linear(
             self.d_model, self.num_key_value_heads * self.key_value_proj_dim, bias=False
         )
         self.v = nn.Linear(
             self.d_model, self.num_key_value_heads * self.key_value_proj_dim, bias=False
         )
-        self.o = nn.Linear(
-            self.n_heads * self.key_value_proj_dim, self.d_model, bias=False
-        )
+        self.o = nn.Linear(self.inner_dim, self.d_model, bias=False)
 
         if self.has_relative_attention_bias:
+            # Keep the original number of heads to match pre-trained weights
             self.relative_attention_bias = nn.Embedding(
                 self.relative_attention_num_buckets, self.n_heads
             )
         self.pruned_heads = set()
         self.gradient_checkpointing = False
+
 
     def prune_heads(self, heads):
         if len(heads) == 0:
@@ -412,69 +391,58 @@ class T5Attention(nn.Module):
         self.pruned_heads = self.pruned_heads.union(heads)
 
     @staticmethod
-    def _relative_position_bucket(relative_position, bidirectional=True, num_buckets=32, max_distance=128):
-        """
-        Adapted from Mesh Tensorflow:
-        https://github.com/tensorflow/mesh/blob/0cb87fe07da627bf0b7e60475d59f95ed6b5be3d/mesh_tensorflow/transformer/transformer_layers.py#L593
-
-        Translate relative position to a bucket number for relative attention. The relative position is defined as
-        memory_position - query_position, i.e. the distance in tokens from the attending position to the attended-to
-        position. If bidirectional=False, then positive relative positions are invalid. We use smaller buckets for
-        small absolute relative_position and larger buckets for larger absolute relative_positions. All relative
-        positions >=max_distance map to the same bucket. All relative positions <=-max_distance map to the same bucket.
-        This should allow for more graceful generalization to longer sequences than the model has been trained on
-
-        Args:
-            relative_position: an int32 Tensor
-            bidirectional: a boolean - whether the attention is bidirectional
-            num_buckets: an integer
-            max_distance: an integer
-
-        Returns:
-            a Tensor with the same shape as relative_position, containing int32 values in the range [0, num_buckets)
-        """
+    def _relative_position_bucket(
+        relative_position, bidirectional=True, num_buckets=32, max_distance=128
+    ):
+        # Function body remains unchanged
         relative_buckets = 0
         if bidirectional:
             num_buckets //= 2
             relative_buckets += (relative_position > 0).to(torch.long) * num_buckets
             relative_position = torch.abs(relative_position)
         else:
-            relative_position = -torch.min(relative_position, torch.zeros_like(relative_position))
-        # now relative_position is in the range [0, inf)
-
-        # half of the buckets are for exact increments in positions
+            relative_position = -torch.min(
+                relative_position, torch.zeros_like(relative_position)
+            )
         max_exact = num_buckets // 2
         is_small = relative_position < max_exact
-
-        # The other half of the buckets are for logarithmically bigger bins in positions up to max_distance
         relative_position_if_large = max_exact + (
             torch.log(relative_position.float() / max_exact)
             / math.log(max_distance / max_exact)
             * (num_buckets - max_exact)
         ).to(torch.long)
         relative_position_if_large = torch.min(
-            relative_position_if_large, torch.full_like(relative_position_if_large, num_buckets - 1)
+            relative_position_if_large,
+            torch.full_like(relative_position_if_large, num_buckets - 1),
         )
-
-        relative_buckets += torch.where(is_small, relative_position, relative_position_if_large)
+        relative_buckets += torch.where(
+            is_small, relative_position, relative_position_if_large
+        )
         return relative_buckets
 
+
     def compute_bias(self, query_length, key_length, device=None):
-        """Compute binned relative position bias"""
+        """Compute binned relative position bias."""
         if device is None:
             device = self.relative_attention_bias.weight.device
-        context_position = torch.arange(query_length, dtype=torch.long, device=device)[:, None]
-        memory_position = torch.arange(key_length, dtype=torch.long, device=device)[None, :]
-        relative_position = memory_position - context_position  # shape (query_length, key_length)
+        context_position = torch.arange(query_length, dtype=torch.long, device=device)[
+            :, None
+        ]
+        memory_position = torch.arange(key_length, dtype=torch.long, device=device)[
+            None, :
+        ]
+        relative_position = memory_position - context_position  # (query_length, key_length)
         relative_position_bucket = self._relative_position_bucket(
-            relative_position,  # shape (query_length, key_length)
+            relative_position,
             bidirectional=(not self.is_decoder),
             num_buckets=self.relative_attention_num_buckets,
             max_distance=self.relative_attention_max_distance,
         )
-        values = self.relative_attention_bias(relative_position_bucket)  # shape (query_length, key_length, num_heads)
-        values = values.permute([2, 0, 1]).unsqueeze(0)  # shape (1, num_heads, query_length, key_length)
-        return values
+        values = self.relative_attention_bias(
+            relative_position_bucket
+        )  # (query_length, key_length, n_heads)
+        values = values.permute(2, 0, 1).unsqueeze(0)  # (1, n_heads, query_length, key_length)
+        return values  # (1, n_heads, query_length, key_length)
 
     def forward(
         self,
@@ -488,110 +456,83 @@ class T5Attention(nn.Module):
         use_cache=False,
         output_attentions=False,
     ):
-        """
-        Self-attention (if key_value_states is None) or attention over source sentence (provided by key_value_states).
-        """
         batch_size, seq_length = hidden_states.shape[:2]
-
         real_seq_length = seq_length
 
         if past_key_value is not None:
-            assert (
-                len(past_key_value) == 2
-            ), f"past_key_value should have 2 past states: keys and values. Got { len(past_key_value)} past states"
+            if len(past_key_value) != 2:
+                raise ValueError(
+                    f"past_key_value should have 2 past states: keys and values. Got {len(past_key_value)} past states"
+                )
             real_seq_length += (
                 past_key_value[0].shape[2] if query_length is None else query_length
             )
 
-        key_length = (
-            real_seq_length if key_value_states is None else key_value_states.shape[1]
-        )
+        key_length = real_seq_length if key_value_states is None else key_value_states.shape[1]
 
-        def shape(states, heads):
-            """projection"""
-            return states.view(
-                batch_size, -1, heads, self.key_value_proj_dim
-            ).transpose(1, 2)
+        # Helper functions within forward
+        def shape(states, n_heads):
+            return states.view(batch_size, -1, n_heads, self.key_value_proj_dim).transpose(1, 2)
 
-        def unshape(states):
-            """reshape"""
-            return (
-                states.transpose(1, 2).contiguous().view(batch_size, -1, self.inner_dim)
+        def unshape(states, n_heads):
+            return states.transpose(1, 2).contiguous().view(batch_size, -1, n_heads * self.key_value_proj_dim)
+
+        def repeat_kv(hidden_states, n_rep):
+            bsz, num_kv_heads, seq_len, head_dim = hidden_states.shape
+            if n_rep == 1:
+                return hidden_states
+            hidden_states = hidden_states[:, :, None, :, :].expand(
+                bsz, num_kv_heads, n_rep, seq_len, head_dim
             )
+            return hidden_states.reshape(bsz, num_kv_heads * n_rep, seq_len, head_dim)
 
-        def project(hidden_states, proj_layer, key_value_states, past_key_value):
-            """projects hidden states correctly to key/query states"""
+        # Define project function within forward
+        def project(hidden_states, proj_layer, key_value_states, past_key_value, n_heads, is_key_value=False):
             if key_value_states is None:
-                # self-attn
-                # (batch_size, n_heads, seq_length, dim_per_head)
-                hidden_states = shape(
-                    proj_layer(hidden_states),
-                    (
-                        self.num_key_value_heads
-                        if proj_layer == self.k or proj_layer == self.v
-                        else self.n_heads
-                    ),
-                )
-            elif past_key_value is None:
-                # cross-attn
-                # (batch_size, n_heads, seq_length, dim_per_head)
-                hidden_states = shape(
-                    proj_layer(key_value_states),
-                    (
-                        self.num_key_value_heads
-                        if proj_layer == self.k or proj_layer == self.v
-                        else self.n_heads
-                    ),
-                )
+                hidden_states = shape(proj_layer(hidden_states), n_heads)
+            else:
+                hidden_states = shape(proj_layer(key_value_states), n_heads)
 
             if past_key_value is not None:
-                if key_value_states is None:
-                    # self-attn
-                    # (batch_size, n_heads, key_length, dim_per_head)
-                    hidden_states = torch.cat([past_key_value, hidden_states], dim=2)
-                elif past_key_value.shape[2] != key_value_states.shape[1]:
-                    # checking that the `sequence_length` of the `past_key_value` is the same as
-                    # the provided `key_value_states` to support prefix tuning
-                    # cross-attn
-                    # (batch_size, n_heads, seq_length, dim_per_head)
-                    hidden_states = shape(
-                        proj_layer(key_value_states),
-                        (
-                            self.num_key_value_heads
-                            if proj_layer == self.k or proj_layer == self.v
-                            else self.n_heads
-                        ),
-                    )
-                else:
-                    # cross-attn
-                    hidden_states = past_key_value
+                if hidden_states.size(1) != past_key_value.size(1):
+                    if is_key_value and self.use_gqa:
+                        n_rep = self.n_heads // n_heads
+                        past_key_value = repeat_kv(past_key_value, n_rep)
+                hidden_states = torch.cat([past_key_value, hidden_states], dim=2)
             return hidden_states
 
-        # get query states
-        query_states = shape(
-            self.q(hidden_states), self.n_heads
-        )  # (batch_size, n_heads, seq_length, dim_per_head)
+        # Get query states
+        query_states = shape(self.q(hidden_states), self.n_heads)
 
-        # get key/value states
+        # Determine the number of key/value heads
+        n_heads_kv = self.num_key_value_heads if self.use_gqa else self.n_heads
+
+        # Project key/value states
         key_states = project(
             hidden_states,
             self.k,
             key_value_states,
             past_key_value[0] if past_key_value is not None else None,
+            n_heads_kv,
+            is_key_value=True,
         )
         value_states = project(
             hidden_states,
             self.v,
             key_value_states,
             past_key_value[1] if past_key_value is not None else None,
+            n_heads_kv,
+            is_key_value=True,
         )
 
-        # Group Query Attention
+        # Repeat key/value states if needed (GQA)
         if self.use_gqa:
-            key_states = repeat_kv(key_states, self.num_key_value_groups)
-            value_states = repeat_kv(value_states, self.num_key_value_groups)
+            n_rep = self.n_heads // n_heads_kv
+            if n_rep > 1:
+                key_states = repeat_kv(key_states, n_rep)
+                value_states = repeat_kv(value_states, n_rep)
 
-        # compute scores
+        # Compute attention scores
         scores = torch.matmul(query_states, key_states.transpose(3, 2))
 
         if position_bias is None:
@@ -608,24 +549,31 @@ class T5Attention(nn.Module):
                     real_seq_length, key_length, device=scores.device
                 )
 
-            # if key and values are already calculated
-            # we want only the last query position bias
             if past_key_value is not None:
                 position_bias = position_bias[:, :, -hidden_states.size(1) :, :]
 
             if mask is not None:
-                position_bias = (
-                    position_bias + mask
-                )  # (batch_size, n_heads, seq_length, key_length)
+                position_bias = position_bias + mask
+
+        if self.use_gqa and self.num_key_value_heads != self.n_heads:
+            # Repeat position_bias to match n_heads
+            n_rep = self.n_heads // self.num_key_value_heads
+            position_bias = position_bias.reshape(1, self.num_key_value_heads, -1, key_length)
+            position_bias = position_bias.repeat_interleave(n_rep, dim=1)
+
+        # if self.use_gqa and self.num_key_value_heads != self.n_heads:
+        #     # Repeat position_bias to match n_heads
+        #     n_rep = self.n_heads // self.num_key_value_heads
+        #     position_bias = position_bias.view(1, self.num_key_value_heads, -1, key_length)
+        #     position_bias = position_bias.repeat_interleave(n_rep, dim=1)
 
         if self.pruned_heads:
-            mask = torch.ones(position_bias.shape[1])
-            mask[list(self.pruned_heads)] = 0
-            position_bias_masked = position_bias[:, mask.bool()]
-        else:
-            position_bias_masked = position_bias
+            mask = torch.ones(position_bias.shape[1], dtype=torch.bool)
+            mask[list(self.pruned_heads)] = False
+            position_bias = position_bias[:, mask]
 
-        scores += position_bias_masked
+        scores += position_bias
+
         attn_weights = nn.functional.softmax(scores.float(), dim=-1).type_as(scores)
         attn_weights = nn.functional.dropout(
             attn_weights, p=self.dropout, training=self.training
@@ -635,12 +583,26 @@ class T5Attention(nn.Module):
         if layer_head_mask is not None:
             attn_weights = attn_weights * layer_head_mask
 
-        attn_output = unshape(torch.matmul(attn_weights, value_states))
+        # Compute attention output
+        attn_output = unshape(torch.matmul(attn_weights, value_states), self.n_heads)
         attn_output = self.o(attn_output)
 
-        present_key_value_state = (
-            (key_states, value_states) if (self.is_decoder and use_cache) else None
-        )
+        if use_cache:
+            # For caching, store only the key/value states before repetition
+            if self.use_gqa and n_rep > 1:
+                key_states_for_cache = key_states.view(
+                    batch_size, n_heads_kv, n_rep, -1, self.key_value_proj_dim
+                )[:, :, 0]
+                value_states_for_cache = value_states.view(
+                    batch_size, n_heads_kv, n_rep, -1, self.key_value_proj_dim
+                )[:, :, 0]
+            else:
+                key_states_for_cache = key_states
+                value_states_for_cache = value_states
+            present_key_value_state = (key_states_for_cache, value_states_for_cache)
+        else:
+            present_key_value_state = None
+
         outputs = (attn_output,) + (present_key_value_state,) + (position_bias,)
 
         if output_attentions:
