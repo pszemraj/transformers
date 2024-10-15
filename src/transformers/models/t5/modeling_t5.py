@@ -358,10 +358,22 @@ class T5Attention(nn.Module):
         # Linear layers for query, key, and value projections
         self.q = nn.Linear(self.d_model, self.inner_dim, bias=False)
         self.k = nn.Linear(
-            self.d_model, self.num_key_value_heads * self.key_value_proj_dim, bias=False
+            self.d_model,
+            (
+                self.num_key_value_heads * self.key_value_proj_dim
+                if self.use_gqa
+                else self.inner_dim
+            ),
+            bias=False,
         )
         self.v = nn.Linear(
-            self.d_model, self.num_key_value_heads * self.key_value_proj_dim, bias=False
+            self.d_model,
+            (
+                self.num_key_value_heads * self.key_value_proj_dim
+                if self.use_gqa
+                else self.inner_dim
+            ),
+            bias=False,
         )
         self.o = nn.Linear(self.inner_dim, self.d_model, bias=False)
 
