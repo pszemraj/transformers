@@ -489,15 +489,12 @@ class T5Attention(nn.Module):
         def unshape(states, n_heads):
             return states.transpose(1, 2).contiguous().view(batch_size, -1, n_heads * self.key_value_proj_dim)
 
-        def repeat_kv(hidden_states, n_rep):
-            bsz, num_kv_heads, seq_len, head_dim = hidden_states.shape
+        def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
+            batch, num_key_value_heads, slen, head_dim = hidden_states.shape
             if n_rep == 1:
                 return hidden_states
-            # Use unsqueeze and expand with -1 to avoid unnecessary memory allocation
-            hidden_states = (
-                hidden_states.unsqueeze(2).expand(-1, -1, n_rep, -1, -1).contiguous()
-            )
-            return hidden_states.view(bsz, num_kv_heads * n_rep, seq_len, head_dim)
+            hidden_states = hidden_states[:, :, None, :, :].expand(batch, num_key_value_heads, n_rep, slen, head_dim)
+            return hidden_states.reshape(batch, num_key_value_heads * n_rep, slen, head_dim)
 
         # Define project function within forward
         def project(hidden_states, proj_layer, key_value_states, past_key_value, n_heads, is_key_value=False):
