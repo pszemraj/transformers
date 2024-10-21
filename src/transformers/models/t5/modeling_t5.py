@@ -493,10 +493,11 @@ class T5Attention(nn.Module):
             bsz, num_kv_heads, seq_len, head_dim = hidden_states.shape
             if n_rep == 1:
                 return hidden_states
-            hidden_states = hidden_states[:, :, None, :, :].expand(
-                bsz, num_kv_heads, n_rep, seq_len, head_dim
+            # Use unsqueeze and expand with -1 to avoid unnecessary memory allocation
+            hidden_states = (
+                hidden_states.unsqueeze(2).expand(-1, -1, n_rep, -1, -1).contiguous()
             )
-            return hidden_states.reshape(bsz, num_kv_heads * n_rep, seq_len, head_dim)
+            return hidden_states.view(bsz, num_kv_heads * n_rep, seq_len, head_dim)
 
         # Define project function within forward
         def project(hidden_states, proj_layer, key_value_states, past_key_value, n_heads, is_key_value=False):
