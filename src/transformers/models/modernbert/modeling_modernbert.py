@@ -1802,7 +1802,6 @@ class ModernBertForMultipleChoice(ModernBertPreTrainedModel):
             num_choices-1]` where `num_choices` is the size of the second dimension of the input tensors.
             (e.g., `input_ids` has shape `(batch_size, num_choices, sequence_length)`)
         """
-        # print("DEBUG: Entering ModernBertForMultipleChoice forward") # Optional: Add print for debugging
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
         self._maybe_set_compile()
 
@@ -1819,14 +1818,22 @@ class ModernBertForMultipleChoice(ModernBertPreTrainedModel):
             raise ValueError("You must specify either input_ids or inputs_embeds")
 
         # --- Flatten Inputs for Batch Processing ---
-        # Use conditional expressions for assignment (like DebertaV2)
-        # This guarantees assignment in one step.
-        flat_input_ids = input_ids.view(-1, seq_len) if input_ids is not None else None
-        flat_attention_mask = attention_mask.view(-1, seq_len) if attention_mask is not None else None
-        flat_position_ids = position_ids.view(-1, seq_len) if position_ids is not None else None
-        flat_inputs_embeds = (
-            inputs_embeds.view(-1, seq_len, self.config.hidden_size) if inputs_embeds is not None else None
-        )
+        # Initialize all flattened variables to None first to prevent UnboundLocalError
+        flat_input_ids = None
+        flat_attention_mask = None
+        flat_position_ids = None
+        flat_inputs_embeds = None
+
+        # Assign values based on provided inputs
+        # Reshape inputs from [batch_size, num_choices, ...] to [batch_size * num_choices, ...]
+        if input_ids is not None:
+            flat_input_ids = input_ids.view(-1, seq_len)
+        if attention_mask is not None:
+            flat_attention_mask = attention_mask.view(-1, seq_len)
+        if position_ids is not None:
+            flat_position_ids = position_ids.view(-1, seq_len)
+        if inputs_embeds is not None:
+            flat_inputs_embeds = inputs_embeds.view(-1, seq_len, self.config.hidden_size)
 
         # sliding_window_mask is typically shared across choices, so we don't flatten it here.
         # The base model will handle it. If it *were* choice specific, it would need flattening.
@@ -1835,18 +1842,17 @@ class ModernBertForMultipleChoice(ModernBertPreTrainedModel):
 
         # --- Model Forward Pass ---
         # The base model handles potential unpadding/repadding internally
-        # It also handles the case where flat_input_ids or flat_inputs_embeds is None.
         outputs = self.model(
-            input_ids=flat_input_ids,
-            attention_mask=flat_attention_mask,
-            sliding_window_mask=sliding_window_mask,
-            position_ids=flat_position_ids,
-            inputs_embeds=flat_inputs_embeds,  # Pass the potentially None value
-            indices=indices,
-            cu_seqlens=cu_seqlens,
-            max_seqlen=max_seqlen,
-            batch_size=flat_batch_size,
-            seq_len=seq_len,
+            input_ids=flat_input_ids,  # Now guaranteed to be assigned (Tensor or None)
+            attention_mask=flat_attention_mask,  # Now guaranteed to be assigned (Tensor or None)
+            sliding_window_mask=sliding_window_mask,  # Pass the original (potentially shared) mask
+            position_ids=flat_position_ids,  # Now guaranteed to be assigned (Tensor or None)
+            inputs_embeds=flat_inputs_embeds,  # Now guaranteed to be assigned (Tensor or None)
+            indices=indices,  # Pass FA2 info if available (for pre-unpadded inputs)
+            cu_seqlens=cu_seqlens,  # Pass FA2 info if available
+            max_seqlen=max_seqlen,  # Pass FA2 info if available
+            batch_size=flat_batch_size,  # Pass flattened batch size for repadding inside model
+            seq_len=seq_len,  # Pass sequence length for repadding inside model
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
