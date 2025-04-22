@@ -1783,17 +1783,18 @@ class ModernBertForMultipleChoice(ModernBertPreTrainedModel):
         self,
         input_ids: Optional[torch.LongTensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
-        sliding_window_mask: Optional[torch.Tensor] = None,
+        sliding_window_mask: Optional[torch.Tensor] = None,  # Note: Usually not choice-specific
         position_ids: Optional[torch.LongTensor] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
         labels: Optional[torch.Tensor] = None,
         indices: Optional[torch.Tensor] = None,  # For pre-unpadded inputs
         cu_seqlens: Optional[torch.Tensor] = None,  # For pre-unpadded inputs
         max_seqlen: Optional[int] = None,  # For pre-unpadded inputs
+        # batch_size and seq_len are inferred or passed to model, not direct inputs here
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
-        **kwargs,
+        **kwargs,  # Accept extra arguments like DebertaV2
     ) -> Union[Tuple[torch.Tensor], MultipleChoiceModelOutput]:
         r"""
         labels (`torch.LongTensor` of shape `(batch_size,)`, *optional*):
@@ -1817,13 +1818,22 @@ class ModernBertForMultipleChoice(ModernBertPreTrainedModel):
             raise ValueError("You must specify either input_ids or inputs_embeds")
 
         # --- Flatten Inputs for Batch Processing ---
+        # Initialize all flattened variables to None first to prevent UnboundLocalError
+        flat_input_ids = None
+        flat_attention_mask = None
+        flat_position_ids = None
+        flat_inputs_embeds = None
+
+        # Assign values based on provided inputs
         # Reshape inputs from [batch_size, num_choices, ...] to [batch_size * num_choices, ...]
-        flat_input_ids = input_ids.view(-1, seq_len) if input_ids is not None else None
-        flat_attention_mask = attention_mask.view(-1, seq_len) if attention_mask is not None else None
-        flat_position_ids = position_ids.view(-1, seq_len) if position_ids is not None else None
-        flat_inputs_embeds = (
-            inputs_embeds.view(-1, seq_len, self.config.hidden_size) if inputs_embeds is not None else None
-        )
+        if input_ids is not None:
+            flat_input_ids = input_ids.view(-1, seq_len)
+        if attention_mask is not None:
+            flat_attention_mask = attention_mask.view(-1, seq_len)
+        if position_ids is not None:
+            flat_position_ids = position_ids.view(-1, seq_len)
+        if inputs_embeds is not None:
+            flat_inputs_embeds = inputs_embeds.view(-1, seq_len, self.config.hidden_size)
 
         # sliding_window_mask is typically shared across choices, so we don't flatten it here.
         # The base model will handle it. If it *were* choice specific, it would need flattening.
@@ -1833,11 +1843,11 @@ class ModernBertForMultipleChoice(ModernBertPreTrainedModel):
         # --- Model Forward Pass ---
         # The base model handles potential unpadding/repadding internally
         outputs = self.model(
-            input_ids=flat_input_ids,
-            attention_mask=flat_attention_mask,
+            input_ids=flat_input_ids,  # Now guaranteed to be assigned (Tensor or None)
+            attention_mask=flat_attention_mask,  # Now guaranteed to be assigned (Tensor or None)
             sliding_window_mask=sliding_window_mask,  # Pass the original (potentially shared) mask
-            position_ids=flat_position_ids,
-            inputs_embeds=flat_inputs_embeds,
+            position_ids=flat_position_ids,  # Now guaranteed to be assigned (Tensor or None)
+            inputs_embeds=flat_inputs_embeds,  # Now guaranteed to be assigned (Tensor or None)
             indices=indices,  # Pass FA2 info if available (for pre-unpadded inputs)
             cu_seqlens=cu_seqlens,  # Pass FA2 info if available
             max_seqlen=max_seqlen,  # Pass FA2 info if available
@@ -1871,15 +1881,16 @@ class ModernBertForMultipleChoice(ModernBertPreTrainedModel):
         elif self.config.classifier_pooling == "mean":
             # Perform mean pooling using the flattened attention mask
             masked_hidden_state = last_hidden_state * flat_attention_mask.unsqueeze(-1)
+            # Clamp sum to avoid division by zero if mask is all zeros (shouldn't happen with CLS/valid inputs)
             pooled_output = masked_hidden_state.sum(dim=1) / flat_attention_mask.sum(dim=1, keepdim=True).clamp(
                 min=1e-9
-            )  # Avoid division by zero
+            )
             # Shape: [batch_size * num_choices, hidden_size]
         else:
             raise ValueError(f"Unsupported pooling type: {self.config.classifier_pooling}")
 
         # --- Classification Head ---
-        pooled_output = self.head(pooled_output)  # Apply prediction head
+        pooled_output = self.head(pooled_output)  # Apply prediction head (Dense + Act + Norm)
         pooled_output = self.drop(pooled_output)  # Apply dropout
         logits = self.classifier(pooled_output)  # Final classification layer, Shape: [batch_size * num_choices, 1]
 
@@ -1896,12 +1907,15 @@ class ModernBertForMultipleChoice(ModernBertPreTrainedModel):
 
         if not return_dict:
             # Return hidden states/attentions from the *flattened* pass if requested
+            # The base model output `outputs` contains hidden states/attentions corresponding
+            # to the flattened input.
             output = (reshaped_logits,) + outputs[1:]
             return ((loss,) + output) if loss is not None else output
 
         return MultipleChoiceModelOutput(
             loss=loss,
             logits=reshaped_logits,
+            # Return hidden states/attentions from the *flattened* pass if requested
             hidden_states=outputs.hidden_states,
             attentions=outputs.attentions,
         )
