@@ -33,6 +33,7 @@ from ...modeling_attn_mask_utils import _prepare_4d_attention_mask
 from ...modeling_outputs import (
     BaseModelOutput,
     MaskedLMOutput,
+    MultipleChoiceModelOutput,
     QuestionAnsweringModelOutput,
     SequenceClassifierOutput,
     TokenClassifierOutput,
@@ -214,7 +215,9 @@ class ModernBertEmbeddings(nn.Module):
         return self.drop(self.norm(self.tok_embeddings(input_ids)))
 
     def forward(
-        self, input_ids: Optional[torch.LongTensor] = None, inputs_embeds: Optional[torch.Tensor] = None
+        self,
+        input_ids: Optional[torch.LongTensor] = None,
+        inputs_embeds: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         if inputs_embeds is not None:
             hidden_states = self.drop(self.norm(inputs_embeds))
@@ -248,7 +251,13 @@ class ModernBertMLP(nn.Module):
 
 
 class ModernBertRotaryEmbedding(nn.Module):
-    def __init__(self, config: ModernBertConfig, dim: int, base: float, device: Optional[torch.device] = None):
+    def __init__(
+        self,
+        config: ModernBertConfig,
+        dim: int,
+        base: float,
+        device: Optional[torch.device] = None,
+    ):
         super().__init__()
         # BC: "rope_type" was originally "type"
         if hasattr(config, "rope_scaling") and config.rope_scaling is not None:
@@ -464,7 +473,10 @@ class ModernBertAttention(nn.Module):
         self.Wqkv = nn.Linear(config.hidden_size, 3 * self.all_head_size, bias=config.attention_bias)
 
         if layer_id % config.global_attn_every_n_layers != 0:
-            self.local_attention = (config.local_attention // 2, config.local_attention // 2)
+            self.local_attention = (
+                config.local_attention // 2,
+                config.local_attention // 2,
+            )
         else:
             self.local_attention = (-1, -1)
 
@@ -631,7 +643,11 @@ class ModernBertPreTrainedModel(PreTrainedModel):
             init_weight(module.decoder, stds["out"])
         elif isinstance(
             module,
-            (ModernBertForSequenceClassification, ModernBertForTokenClassification, ModernBertForQuestionAnswering),
+            (
+                ModernBertForSequenceClassification,
+                ModernBertForTokenClassification,
+                ModernBertForQuestionAnswering,
+            ),
         ):
             init_weight(module.classifier, stds["final_out"])
         elif isinstance(module, nn.LayerNorm):
@@ -721,7 +737,14 @@ def _unpad_modernbert_input(
     attention_mask: torch.Tensor,
     position_ids: Optional[torch.Tensor] = None,
     labels: Optional[torch.Tensor] = None,
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, int, Optional[torch.Tensor], Optional[torch.Tensor]]:
+) -> Tuple[
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    int,
+    Optional[torch.Tensor],
+    Optional[torch.Tensor],
+]:
     """
     Remove padding from input sequences.
 
@@ -754,7 +777,14 @@ def _unpad_modernbert_input(
     unpadded_position_ids = position_ids.flatten()[indices] if position_ids is not None else None
     unpadded_labels = labels.flatten()[indices] if labels is not None else None
 
-    return unpadded_inputs, indices, cu_seqlens, max_seqlen_in_batch, unpadded_position_ids, unpadded_labels
+    return (
+        unpadded_inputs,
+        indices,
+        cu_seqlens,
+        max_seqlen_in_batch,
+        unpadded_position_ids,
+        unpadded_labels,
+    )
 
 
 def _pad_modernbert_output(
@@ -1110,12 +1140,32 @@ class ModernBertForMaskedLM(ModernBertPreTrainedModel):
 
                 if inputs_embeds is None:
                     with torch.no_grad():
-                        input_ids, indices, cu_seqlens, max_seqlen, position_ids, labels = _unpad_modernbert_input(
-                            inputs=input_ids, attention_mask=attention_mask, position_ids=position_ids, labels=labels
+                        (
+                            input_ids,
+                            indices,
+                            cu_seqlens,
+                            max_seqlen,
+                            position_ids,
+                            labels,
+                        ) = _unpad_modernbert_input(
+                            inputs=input_ids,
+                            attention_mask=attention_mask,
+                            position_ids=position_ids,
+                            labels=labels,
                         )
                 else:
-                    inputs_embeds, indices, cu_seqlens, max_seqlen, position_ids, labels = _unpad_modernbert_input(
-                        inputs=inputs_embeds, attention_mask=attention_mask, position_ids=position_ids, labels=labels
+                    (
+                        inputs_embeds,
+                        indices,
+                        cu_seqlens,
+                        max_seqlen,
+                        position_ids,
+                        labels,
+                    ) = _unpad_modernbert_input(
+                        inputs=inputs_embeds,
+                        attention_mask=attention_mask,
+                        position_ids=position_ids,
+                        labels=labels,
                     )
 
         outputs = self.model(
@@ -1457,6 +1507,163 @@ class ModernBertForQuestionAnswering(ModernBertPreTrainedModel):
         )
 
 
+@add_start_docstrings(
+    """
+    ModernBert Model with a multiple choice classification head on top (a linear layer on top of the pooled output and
+    a softmax) for tasks like SWAG, RocStories/SWAG, etc.
+    """,
+    MODERNBERT_START_DOCSTRING,
+)
+class ModernBertForMultipleChoice(ModernBertPreTrainedModel):
+    def __init__(self, config: ModernBertConfig):
+        super().__init__(config)
+        self.config = config
+
+        self.model = ModernBertModel(config)
+        self.head = ModernBertPredictionHead(config)
+        self.drop = nn.Dropout(config.classifier_dropout)
+        # The output layer will have only 1 class - we'll reshape later
+        self.classifier = nn.Linear(config.hidden_size, 1)
+
+        # Initialize weights and apply final processing
+        self.post_init()
+
+    @add_start_docstrings_to_model_forward(MODERNBERT_INPUTS_DOCSTRING)
+    @add_code_sample_docstrings(
+        checkpoint=_CHECKPOINT_FOR_DOC,
+        output_type=MultipleChoiceModelOutput,
+        config_class=_CONFIG_FOR_DOC,
+    )
+    def forward(
+        self,
+        input_ids: Optional[torch.LongTensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        sliding_window_mask: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.LongTensor] = None,
+        inputs_embeds: Optional[torch.Tensor] = None,
+        labels: Optional[torch.Tensor] = None,
+        indices: Optional[torch.Tensor] = None,
+        cu_seqlens: Optional[torch.Tensor] = None,
+        max_seqlen: Optional[int] = None,
+        batch_size: Optional[int] = None,
+        seq_len: Optional[int] = None,
+        output_attentions: Optional[bool] = None,
+        output_hidden_states: Optional[bool] = None,
+        return_dict: Optional[bool] = None,
+        **kwargs,
+    ) -> Union[Tuple[torch.Tensor], MultipleChoiceModelOutput]:
+        r"""
+        labels (`torch.LongTensor` of shape `(batch_size,)`, *optional*):
+            Labels for computing the multiple choice classification loss. Indices should be in `[0, ...,
+            num_choices-1]` where `num_choices` is the size of the second dimension of the input tensors.
+        """
+        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+        self._maybe_set_compile()
+
+        # input_ids: [batch_size, num_choices, seq_len]
+        num_choices = input_ids.shape[1] if input_ids is not None else inputs_embeds.shape[1]
+
+        if input_ids is not None:
+            # Flatten input for processing: [batch_size * num_choices, seq_len]
+            flat_input_ids = input_ids.view(-1, input_ids.size(-1))
+            flat_seq_len = input_ids.size(-1)
+            flat_batch_size = flat_input_ids.shape[0]
+        else:
+            flat_batch_size = inputs_embeds.size(0) * inputs_embeds.size(1)
+            flat_seq_len = inputs_embeds.size(-2)
+            # Flatten input for processing: [batch_size * num_choices, seq_len, hidden]
+            flat_inputs_embeds = inputs_embeds.view(-1, inputs_embeds.size(-2), inputs_embeds.size(-1))
+
+        # Flatten attention mask if provided
+        flat_attention_mask = attention_mask.view(-1, attention_mask.size(-1)) if attention_mask is not None else None
+        flat_position_ids = position_ids.view(-1, position_ids.size(-1)) if position_ids is not None else None
+
+        # For Flash Attention 2, we need to handle unpadding/padding
+        repad = False
+        if self.config._attn_implementation == "flash_attention_2":
+            if indices is None and cu_seqlens is None and max_seqlen is None:
+                repad = True
+                if flat_inputs_embeds is None:
+                    with torch.no_grad():
+                        (
+                            flat_input_ids,
+                            indices,
+                            cu_seqlens,
+                            max_seqlen,
+                            flat_position_ids,
+                            _,
+                        ) = _unpad_modernbert_input(
+                            inputs=flat_input_ids,
+                            attention_mask=flat_attention_mask,
+                            position_ids=flat_position_ids,
+                        )
+                else:
+                    (
+                        flat_inputs_embeds,
+                        indices,
+                        cu_seqlens,
+                        max_seqlen,
+                        flat_position_ids,
+                        _,
+                    ) = _unpad_modernbert_input(
+                        inputs=flat_inputs_embeds,
+                        attention_mask=flat_attention_mask,
+                        position_ids=flat_position_ids,
+                    )
+
+        # Run the model on flattened inputs
+        outputs = self.model(
+            input_ids=flat_input_ids if input_ids is not None else None,
+            attention_mask=flat_attention_mask,
+            sliding_window_mask=sliding_window_mask,
+            position_ids=flat_position_ids,
+            inputs_embeds=flat_inputs_embeds if inputs_embeds is not None else None,
+            indices=indices,
+            cu_seqlens=cu_seqlens,
+            max_seqlen=max_seqlen,
+            batch_size=flat_batch_size,
+            seq_len=flat_seq_len,
+            output_attentions=output_attentions,
+            output_hidden_states=output_hidden_states,
+            return_dict=return_dict,
+        )
+
+        # Get the last hidden state
+        last_hidden_state = outputs[0]
+
+        # Apply pooling - choose CLS token or mean pooling based on config
+        if self.config.classifier_pooling == "cls":
+            pooled_output = last_hidden_state[:, 0]
+        elif self.config.classifier_pooling == "mean":
+            pooled_output = (last_hidden_state * flat_attention_mask.unsqueeze(-1)).sum(
+                dim=1
+            ) / flat_attention_mask.sum(dim=1, keepdim=True)
+
+        # Run through prediction head, dropout, and classifier
+        pooled_output = self.head(pooled_output)
+        pooled_output = self.drop(pooled_output)
+        logits = self.classifier(pooled_output)
+
+        # Reshape logits back to [batch_size, num_choices]
+        reshaped_logits = logits.view(-1, num_choices)
+
+        loss = None
+        if labels is not None:
+            loss_fct = CrossEntropyLoss()
+            loss = loss_fct(reshaped_logits, labels)
+
+        if not return_dict:
+            output = (reshaped_logits,) + outputs[1:]
+            return ((loss,) + output) if loss is not None else output
+
+        return MultipleChoiceModelOutput(
+            loss=loss,
+            logits=reshaped_logits,
+            hidden_states=outputs.hidden_states,
+            attentions=outputs.attentions,
+        )
+
+
 __all__ = [
     "ModernBertModel",
     "ModernBertPreTrainedModel",
@@ -1464,4 +1671,5 @@ __all__ = [
     "ModernBertForSequenceClassification",
     "ModernBertForTokenClassification",
     "ModernBertForQuestionAnswering",
+    "ModernBertForMultipleChoice",
 ]
